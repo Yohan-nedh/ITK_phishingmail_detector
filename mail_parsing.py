@@ -6,7 +6,7 @@ from email import policy
 from bs4 import BeautifulSoup # Pour extraire les liens du contenu HTML
 
 
-filepath = "" # À completter
+filepath = "" # À completer
 with open(filepath, "rb") as f:
     msg = BytesParser(policy=policy.default).parse(f)
 
@@ -92,8 +92,6 @@ def extract_body_data(msg):
     files = []
     links = []
     for part in msg.walk():
-        if part.get_content_maintype() != "multipart":
-            continue
         content_type = part.get_content_type()
         content_disposition = str(part.get_content_disposition())
 
@@ -107,9 +105,14 @@ def extract_body_data(msg):
             files.append(filename)
             continue
     if html:
-        soup = BeautifoulSoup(html, "html.parser") # Création de la soupe. La soupe, c'est ce qui va permettre d'extraire les trucs de l'html
+        soup = BeautifulSoup(html, "html.parser") # Création de la soupe. La soupe, c'est ce qui va permettre d'extraire les trucs de l'html
         for a in soup.find_all("a", href=True):
-            links.append((a.get_text(strip=True), a['href']))
+            links.append(a['href'])
+    if text:
+        url_regex = r'\b(?:https?://|www\.)[a-zA-Z0-9._\-~:/?#\[\]@!$&\'()*+,;=%]+(?<![)\],.;!?])'
+        matches = re.findall(url_regex, text)
+        links.extend(matches)
+
     return {"text": text.strip(), "html": html.strip(), "links": links, "attachments": files}
         
      
@@ -123,5 +126,4 @@ def extract_body_data(msg):
 - Le cas où il y a plusieurs tests ou champs (spf, dkim, dmarc)
 - Le cas où il n'y aura pas d'adresse ip dans les champs received mais des hostname
 - Revoir le regex ip, et faire le regex ipv4 et ipv6 à part, afin de mieux extraire les adresses
-- Revoir extract_body_data pour extraire les urls ou liens contenu dans le body
 """
