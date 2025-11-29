@@ -1,11 +1,9 @@
 # Parsing eml files
-import re  # POur extraire les ip
+import re
 import ipaddress
 from email.parser import BytesParser
 from email import policy
-from bs4 import BeautifulSoup # Pour extraire les liens du contenu HTML
-
-
+from bs4 import BeautifulSoup # Pour extraire les liens du contenu HTML, ne pas oublier d'installer html.parser
 
 
 """
@@ -21,6 +19,7 @@ from bs4 import BeautifulSoup # Pour extraire les liens du contenu HTML
 - Pièces jointes
 - ...
 """
+
 
 def extract_header_data(msg):
     from_ = msg.get("From", None) # from_ à cause du mot clé from
@@ -100,12 +99,15 @@ def extract_body_data(msg):
 
         if content_disposition == "attachment":
             filename = part.get_filename()
-            files.append(filename)
+            files.append({
+                'filename': filename,
+                'content_type': content_type
+            })
             continue
     if html:
         soup = BeautifulSoup(html, "html.parser") # Création de la soupe. La soupe, c'est ce qui va permettre d'extraire les trucs de l'html
         for a in soup.find_all("a", href=True):
-            links.append(a['href'])
+            links.append((a.get_text(strip=True), a['href']))
     if text:
         url_regex = r'\b(?:https?://|www\.)[a-zA-Z0-9._\-~:/?#\[\]@!$&\'()*+,;=%]+(?<![)\],.;!?])'
         matches = re.findall(url_regex, text)

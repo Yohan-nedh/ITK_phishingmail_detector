@@ -6,22 +6,29 @@ Compatible avec mail_parsing.py
 
 import re
 import tldextract
-import Levenshtein # détction de typosquattage 
+import Levenshtein # détection de typosquattage
 from urllib.parse import urlparse
+
+# Optionnel: Au cas où l'user n'aura pas la connexion internet
+try:
+    import requests # pour résooudre les shortener, histoire de voir où ça mène vraiment 
+except Exception:
+    requests = None
+
 
 # === CONFIGURATION LOCALE ===
 WHITELIST_DOMAINS = {
     "paypal.com", "paypal.fr",
     "amazon.com", "amazon.fr",
     "banque-populaire.fr", "credit-agricole.fr", "labanquepostale.fr",
-    "gmail.com", "outlook.com", "yahoo.com", "orange.fr", "free.fr"
+    "gmail.com", "outlook.com", "yahoo.com", "orange.fr", "free.fr", "portswigger.net"
 }
 
 SUSPICIOUS_KEYWORDS = [
     "urgent", "immédiatement", "bloqué", "suspendu", "désactivé",
     "cliquez ici", "vérifiez votre compte", "mot de passe", "confidentiel",
     "mise à jour", "sécurité", "paiement", "facture", "problème",
-    "action requise", "identifiez-vous", "connexion", "accès"
+    "action requise", "identifiez-vous", "cher client", "connexion", "accès"
 ]
 
 BLACKLIST_DOMAINS = {
@@ -31,40 +38,105 @@ BLACKLIST_DOMAINS = {
 
 URL_SHORTENERS = {"bit.ly", "t.co", "goo.gl", "tinyurl.com", "ow.ly"}
 DANGEROUS_EXT = {".exe", ".scr", ".js", ".vbs", ".bat", ".ps1", ".zip", ".rar"}
+DANGEROUS_MIME = {"application/x-msdownload", "application/x-msdos-program", "application/x-executable", "application/javascript", "text/javascript"}
 
 
 # === FONCTIONS UTILITAIRES ===
-def take_domain(email):
-    """Extrait le domaine d'une adresse email."""
-    email = email.split()[-1]
-    if isinstance(email, str) and "@" in email:
-        if email.startswith('<') and email.endswith('>'):
-            email = email[1:-1]
-        return email.split("@")[-1].strip().lower()
-    return ""
+def normalize_email_addr(addr):
+    """Nettoie le champ possible: 'Name <user@domain>' -> user@domain"""
+    if not addr:
+        return ""
+    if "<" in addr and ">" in addr:
+        last = addr[addr.find("<") + 1: addr.find(">")]
+        return last.strip().lower()
+    return addr.strip().lower()
 
 
-def get_tld(domain):
-    """Extrait le TLD du domaine"""
-    domain = take_domain(domain)
-    ext = tldextract.extract(domain)
-    return ext.domain + '.' + ext.suffix
+def get_host_reg_domain(hostname):
+    """Extrait le domaine enrégistré d'un hostname."""
+    if not hostname:
+        return ""
+    if "@" in hostname and hostname.count("@") == 1 and not hostname.startswith("http"):
+        hostname = hostname.split("@")[-1]
+
+    hostname = hostname.strip().lower()
+    if hostname.startswith("[") and hostname.endswith("]"):
+        hostname = hostname[1:-1]
+    
+    if ":" in hostname and not ":" in hostname.replace("::", ""):
+        hostname = hostname.split(":")[0]
+
+    ext = tldextract.extract(hostname)
+    if ext.suffix:
+        return f"{ext.domain}.{ext.suffix}"
+    return ext.domain
 
 
-def take_url(url):
-    """Extrait le domaine d'une URL."""
+def get_url_reg_domain(url):
+    """Extrait le nom de domaine d'une URL."""
     try:
-        return urlparse(url).netloc.lower()
-    except:
+        parsed = urlparse(url)
+        host = parsed.netloc or parsed.path # parfois url est sans scheme(http, https,...)
+        # si host contient credentials (user:pass@host)
+        if "@" in host:
+            host = host.split("@")[-1]
+        return get_host_reg_domain(host)
+    except Exception:
         return ""
 
 
-def is_lookalike(domain):
+def extract_host_from_url(url):
+    try:
+        parsed = urlparse(url)
+        host = parsed.netloc or parsed.path
+        if "@" in host:
+            host = host.split("@")[-1]
+        # strip port
+        if ":" in host and not ":" in host.replace("::", ""):
+            host = host.split(":")[0]
+        return host.lower().strip()
+    except Exception:
+        return ""
+
+
+def is_shortener(hostname):
+    """Pour voir si le hostname est un shortener"""
+    rd = get_host_reg_domain(hostname)
+    return rd in URL_SHORTENERS
+
+
+def resolve_shortener(url, timeout=3.0):
+    """Suivre les redirections d'un shortener pour récupérer la destination finale"""
+    if not requests:
+        return None
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=timeout)
+        return r.url
+    except Exception:
+        try:
+            r = requests.get(url, allow_redirects=True, timeout=timeout)
+            return r.url
+        except Exception:
+            return None
+
+
+def is_lookalike(domain, candidates=None, max_distance=2):
     """Détecte le typosquattage"""
-    for legit in WHITELIST_DOMAINS:
-        if 1 <= Levenshtein.distance() <=2:
-            return True, legit
-    return False, None
+    if not domain:
+        return False, None, 0
+    domain = domain.lower()
+    if candidates is None:
+        candidates = list(WHITELIST_DOMAINS)
+    best = None
+    best_d = None
+    for cand in candidates:
+        d = Levenshtein.distance(domain, cand)
+    if best is None or d < best_d:
+        best = cand
+        best_d = d
+    if best is not None and best_d <= max_distance and best != domain:
+        return True, best, best_d
+    return False, None, 0
 
 
 # === ANALYSES ===
@@ -74,38 +146,44 @@ def analyse_headers(headers):
     issues = []
 
     # --- Expéditeur ---
-    from_addr = headers.get("from", "")
-    reply_to = headers.get("reply_to", "")
-    from_domain = take_domain(from_addr)
+    from_raw = headers.get("from", "")
+    reply_to_raw = headers.get("reply_to", "")
+    from_addr = normalize_email_addr(from_raw)
+    reply_to = normalize_email_addr(reply_to_raw)
+    from_reg = get_host_reg_domain(from_addr)
+    reply_reg = get_host_reg_domain(reply_to)
     
-    if from_addr and reply_to and get_tld(from_addr) != get_tld(reply_to):
+    if from_addr and reply_to and from_reg != reply_reg:
         score += 30
-        issues.append("Incohérence entre De et Répondre à")
+        issues.append(f"Incohérence entre les champs 'De' et 'Répondre à': {from_reg} != {reply_reg}")
 
-    if get_tld(from_domain) in BLACKLIST_DOMAINS:
-        score += 50
-        issues.append(f"Domaine connu pour phishing : {from_domain}")
-    elif from_domain:
-        lookalike, true_domain = is_lookalike(from_domain)
-        if lookalike:
-            score += 20
-            issues.append(f"{domain} ressemble à {target} → risque phishing")
-    elif from_domain and get_tld(from_domain) not in WHITELIST_DOMAINS:
-        if any(legit in from_domain for legit in ["paypal", "amazon", "banque", "gmail"]): # À revoir, ça va créer trop de faux positifs, le cas de 
-            score += 40
-            issues.append(f"Domaine falsifié : {from_domain}")
+    if from_reg:
+        if from_reg in BLACKLIST_DOMAINS:
+            score += 50
+            issues.append(f"Domaine connu pour phishing : {from_reg}")
         else:
-            score += 20
-            issues.append(f"Domaine non reconnu : {from_domain}")
+            lookalike, true_domain, dist = is_lookalike(from_reg)
+            if lookalike:
+                score += 20
+                issues.append(f"{from_reg} ressemble à {true_domain} (d={dist})")
+            
+            if from_reg not in WHITELIST_DOMAINS:
+                if any(legit in from_reg for legit in ["paypal", "amazon", "banque", "gmail"]): # À revoir, ça va créer trop de faux positifs, le cas de 
+                    score += 40
+                    issues.append(f"Domaine falsifié : {from_reg}")
+                else:
+                    score += 20
+                    issues.append(f"Domaine non reconnu : {from_reg}")
+
 
     # --- Authentification (SPF, DKIM, DMARC) ---
     auth = headers.get("authentication_results", {})
     for protocol in ["SPF", "DKIM", "DMARC"]:
         result = auth.get(protocol, "").lower()
-        if result == "fail":
+        if result and result in ["fail", "permerror"]:
             score += 30
             issues.append(f"{protocol} a échoué")
-        elif result == "none":
+        elif result and result == "none":
             score += 15
             issues.append(f"{protocol} absent")
 
@@ -117,6 +195,16 @@ def analyse_headers(headers):
     if "compte" in subject and ("bloqué" in subject or "suspendu" in subject):
         score += 25
         issues.append("Phrase typique de phishing dans le sujet")
+
+    # --- Champs Received pour le nombre de serveurs relais ---
+    received_headers = headers.get("received", {}).get("raw", [])
+    received_len = len(received_headers)
+    if received_len >= 6:
+        score += 15
+        issues.append("Trop de serveurs relais: ", received_len)
+        
+        sender_ip = headers.get("received", {}).get("sender_ip", "")
+        issues.append(f"Adresse IP de l'emetteur: {sender_ip}")
 
     return score, issues
 
@@ -135,7 +223,7 @@ def analyse_corps(body):
     return score, issues
 
 
-def analyse_liens(body, sender_domain):
+def analyse_liens(body, sender_domain_reg):
     """Analyse les liens (usurpation, raccourcisseur, domaine)."""
     score = 0
     issues = []
@@ -143,7 +231,10 @@ def analyse_liens(body, sender_domain):
 
     url_regex = r'\b(?:https?://|www\.)[a-zA-Z0-9._\-~:/?#\[\]@!$&\'()*+,;=%]+(?<![)\],.;!?])'
 
+    analysed_links = set() # Pour éviter les mêmes liens ne soient analysés plusieurs fois surtout dans les cas, où on appelera requests
     for link in links:
+        if link in analysed_links:
+            continue
         # Si c'est une URL brute (str), pas un tuple
         if isinstance(link, str):
             url = link
@@ -151,32 +242,54 @@ def analyse_liens(body, sender_domain):
         else:
             display_text, url = link
 
-        url_domain = take_url(url)
+        host = extract_host_from_url(url)
+        if not host:
+            continue
+        url_reg = get_url_reg_domain(url)
         
-        # Lien usurpé (texte ≠ domaine)
-        matches = re.findall(url_regex, display_text)
-        for l in matches:
-            domain_in_text = take_url(l)
-            if domain_in_text and domain_in_text != url_domain and sender_domain not in url_domain:
-                score += 25
-                issues.append(f"Lien usurpé : « {l} » → {url_domain}")
-    
-
-        # Domaine différent de l'expéditeur
-        if sender_domain and sender_domain not in url_domain:
-            score += 20
-            issues.append(f"Lien externe : {url_domain}")
-
-        # Raccourcisseur
-        if url_domain in URL_SHORTENERS:
-            score += 20
-            issues.append(f"Raccourcisseur détecté : {url_domain}")
-
         # Domaine dans la liste noire
-        if url_domain in BLACKLIST_DOMAINS:
+        if url_reg in BLACKLIST_DOMAINS:
             score += 50
             issues.append(f"Domaine malveillant : {url_domain}")
 
+        # Détection de typosquattage
+        look, match, dist = is_lookalike(url_reg)
+        if look:
+            score += 40
+            issues.append(f"Possible typosquat: {url_reg} ressemble à {match} (d={dist})")
+        
+        # Lien usurpé (texte ≠ domaine)
+        matches = re.findall(url_regex, display_text)
+        if matches:
+            for l in matches:
+                domain_in_text = get_url_reg_domain(l)
+                if domain_in_text and domain_in_text != url_reg:
+                    score += 25
+                    issues.append(f"Lien usurpé : « {l} » mais pointe vers {url_reg}")
+        
+
+        # Domaine différent de l'expéditeur
+        if sender_domain_reg and sender_domain_reg not in url_reg:
+            if url_reg not in {'googleusercontent.com','amazonaws.com','cloudfront.net','facebook.com', 'portswigger.net'}: # Pour ne pas trop agressif envers les CDNs/trackers courants
+                score += 20
+                issues.append(f"Lien externe : {url_reg} (expéditeur: {sender_domain_reg})")
+               
+        # Raccourcisseur
+        if is_shortener(host):
+            score += 20
+            issues.append(f"Raccourcisseur détecté : {url_reg}")
+             # Optionnel: Résoud shortener si connexion internet
+            if requests:
+                resolved = resolve_shortener(url)
+                if resolved and resolved != href:
+                    dest_reg = get_registered_domain_from_url(resolved)
+                    issues.append(f"Shortener résolu vers {dest_reg}")
+                    # reévaluer resolved dest
+                    if dest_reg in BLACKLIST_DOMAINS:
+                        score += 50
+                        issues.append(f"Destination shortener en blacklist: {dest_reg}")
+        
+        analysed_links.add(link)
     return score, issues
 
 
@@ -187,10 +300,22 @@ def analyse_pieces_jointes(body):
     files = body.get("attachments", [])
 
     for f in files:
-        ext = "." + f.split(".")[-1].lower() if "." in f else "" # Ajouter la détection du type MIME, pour les cas où la vraie extension est masquée: malicious.exe.pdf
+        fname = f.get('filename', '')
+        mime = f.get('content_type', '').lower()
+
+        ext = ('.' + fname.rsplit('.', 1)[-1].lower()) if '.' in fname else ''
+        double_exts = re.findall(r"\.([a-z0-9]{1,6})", fname.lower())
+
         if ext in DANGEROUS_EXT:
             score += 50
-            issues.append(f"Pièce jointe dangereuse : {f}")
+            issues.append(f"Pièce jointe dangereuse : {fname}")
+        if any('.' + e in DANGEROUS_EXT for e in double_exts[-2:]):
+            score += 60
+            issues.append(f"Double extension suspecte: {fname}")
+
+        if mime in DANGEROUS_MIME:
+            score += 40
+            issues.append(f"MIME dangereux: {mime} pour {fname}")
 
     return score, issues
 
@@ -201,19 +326,28 @@ def detecter_phishing(headers, body):
     total_score = 0
     all_issues = []
 
-    sender_domain = take_domain(headers.get("from", ""))
+    sender_domain_reg = normalize_email_addr(headers.get("from", ""))
+    sender_domain_reg = get_host_reg_domain(sender_domain_reg)
 
     # Toutes les analyses
     analyses = [
         analyse_headers(headers),
         analyse_corps(body),
-        analyse_liens(body, sender_domain),
+        analyse_liens(body, sender_domain_reg),
         analyse_pieces_jointes(body)
     ]
 
     for s, i in analyses:
         total_score += s
         all_issues.extend(i)
+
+    unique_issues = []
+    seen = set()
+
+    for issue in all_issues:
+        if issue not in seen:
+            seen.add(issue)
+            unique_issues.append(issue)
 
     total_score = min(total_score, 100)
 
@@ -227,7 +361,7 @@ def detecter_phishing(headers, body):
     return {
         "score": total_score,
         "niveau_risque": niveau,
-        "problemes": all_issues,
+        "problemes": unique_issues,
         "recommandations": [
             "Ne cliquez sur aucun lien",
             "Ne téléchargez pas les pièces jointes",
@@ -241,13 +375,43 @@ def detecter_phishing(headers, body):
 
 """
 MODIFS:
-- Amélioration de la fonction take_domain pour gérer le cas l'email sera entre < >
-- Ajout de la fonction get_tld(), pour détecter les vrais domaines(TLD), dans les cas où il aura des sous domaines. Par ex, si on a: info.microsoft.com.evil.org, ça donnera : evil.org
-- 
+- Ajout des fonctions: normalize_email_addr(), 
+                       get_host_reg_domain(),
+                       extract_host_from_url(),
+                       is_shortener(),
+                       resolve_shortener(),
+                       is_lookalike(),
+
+
+- Complément et modif de la fonction take_url() en extract_host_>
+- Ajout de l'analyse des champs received
+- Affichage des problèmes sans duplication à la fin
+- Et quelques autres petites modifs...
 """
 
+
 """
-AUTRES REMARQUES
+AUTRES REMARQUES:
 - La white list, black list, suspicious word ne sont pas assez exhaustives. Ça peut biaiser les résultats. DOnc, on va revoir ça.
 - Suspicious keyword est en français, dans le cas où le mail est dans une autre langue.....
+"""
+
+
+
+
+
+
+"""
+from mail_parsing import extract_header_data, extract_body_data
+from email.parser import BytesParser
+from email import policy
+with open('data/suspicious_mail.txt', "rb") as f:
+            msg = BytesParser(policy=policy.default).parse(f)
+
+headers = extract_header_data(msg)
+
+sender_domain_reg = get_host_reg_domain(normalize_email_addr(headers.get("from", "")))
+print(headers.get("from", ""))
+print()
+print(sender_domain_reg)
 """
