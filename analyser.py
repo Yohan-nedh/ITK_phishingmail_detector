@@ -7,6 +7,8 @@ Compatible avec mail_parsing.py
 import re
 import tldextract
 import Levenshtein # détection de typosquattage
+import whois
+from datetime import datetime
 from urllib.parse import urlparse
 
 # Optionnel: Au cas où l'user n'aura pas la connexion internet
@@ -19,9 +21,16 @@ except Exception:
 # === CONFIGURATION LOCALE ===
 WHITELIST_DOMAINS = {
     "paypal.com", "paypal.fr",
-    "amazon.com", "amazon.fr", "stripe.com",
-    "banque-populaire.fr", "credit-agricole.fr", "labanquepostale.fr",
-    "gmail.com", "outlook.com", "yahoo.com", "orange.fr", "free.fr", "portswigger.net"
+    "amazon.com", "amazon.fr", "stripe.com", "tryhackme.com",
+    "banque-populaire.fr", "credit-agricole.fr", "labanquepostale.fr", "freecodecamp.org",
+    "gmail.com", "outlook.com", "yahoo.com", "orange.fr", "free.fr", "portswigger.net", "coursera.org"
+
+    # réseaux sociaux
+    "discord.com", "twitter.com", "x.com",
+    "instagram.com", "linkedin.com", "youtube.com", "facebook.com",
+
+    # CDNs/trackers
+    'googleusercontent.com','amazonaws.com','cloudfront.net'
 }
 
 SUSPICIOUS_KEYWORDS = [
@@ -34,6 +43,19 @@ SUSPICIOUS_KEYWORDS = [
 BLACKLIST_DOMAINS = {
     "paypa1.com", "amaz0n-security.com", "gma1l.com",
     "paypal-support.net", "banque-securite.com", "amazon-verification.org"
+}
+
+FREEMAIL_DOMAINS = {
+    "gmail.com",
+    "yahoo.com", "yahoo.fr", "ymail.com",
+    "hotmail.com", "hotmail.fr", "outlook.com", "outlook.fr", "live.com", "msn.com",
+    "aol.com",
+    "icloud.com", "me.com",
+    "protonmail.com", "proton.me",
+    "gmx.com", "gmx.fr",
+    "mail.com",
+    "zoho.com",
+    "yandex.com"
 }
 
 URL_SHORTENERS = {"bit.ly", "t.co", "goo.gl", "tinyurl.com", "ow.ly"}
@@ -99,6 +121,36 @@ def extract_host_from_url(url):
         return ""
 
 
+def get_domain_age(domain):
+    """Retourne l'âge du domaine en jours, ou -1 en cas de doute."""
+    try:
+        w = whois.whois(domain)
+    except Exception:
+        return -1
+
+    creation = w.creation_date
+
+    # Peut être une liste → on prend la plus ancienne (plus logique)
+    if isinstance(creation, list):
+        creation = min(creation)
+
+    # Peut être une string → on tente de parser
+    if isinstance(creation, str):
+        try:
+            creation = datetime.fromisoformat(creation)
+        except:
+            return -1
+
+    # Vérifie que c'est bien un datetime
+    if not isinstance(creation, datetime):
+        return -1
+
+    # Neutraliser timezone-aware datetimes
+    creation = creation.replace(tzinfo=None)
+
+    return (datetime.utcnow() - creation).days
+
+
 def is_shortener(hostname):
     """Pour voir si le hostname est un shortener"""
     rd = get_host_reg_domain(hostname)
@@ -153,9 +205,33 @@ def analyse_headers(headers):
     from_reg = get_host_reg_domain(from_addr)
     reply_reg = get_host_reg_domain(reply_to)
     
+    auth = headers.get("authentication_results", {})
+
     if from_addr and reply_to and from_reg != reply_reg:
-        score += 30
-        issues.append(f"Incohérence entre les champs 'De' et 'Répondre à': {from_reg} != {reply_reg}")
+        dmarc_check = auth.get("DMARC", "").lower()
+        if dmarc_check:
+            if dmarc_check in ["fail", "permerror"]:
+                score += 30
+                issues.append(f"Incohérence entre les champs 'De' et 'Répondre à': {from_reg} != {reply_reg}, avec échec du dmarc")
+
+        if from_reg not in FREEMAIL_DOMAINS and reply_reg in FREEMAIL_DOMAINS:
+            score += 20
+            issues.append(f"Incohérence entre les champs 'De' et 'Répondre à': {from_reg} != {reply_reg}, reply-to pointe vers une adresse privée alors que l'emetteur est une entreprise")
+
+        if (from_reg and reply_reg) not in FREEMAIL_DOMAINS:
+            score += 10
+        
+        from_username = from_raw.split()[:-1]
+        if isinstance(from_username, list):
+            from_username = "".join(from_username).strip()
+
+        reply_to_username = reply_to_raw.split()[:-1]
+        if isinstance(reply_to_username, list):
+            reply_to_username = "".join(reply_to_username).strip()
+
+        if from_username and reply_to_username and from_username != reply_to_username:
+            score += 20
+            issues.append(f"Incohérence entre les usernames des champs 'De' et 'Répondre à': {from_username} != {reply_to_username}")
 
     if from_reg:
         if from_reg in BLACKLIST_DOMAINS:
@@ -172,12 +248,26 @@ def analyse_headers(headers):
                     score += 40
                     issues.append(f"Domaine falsifié : {from_reg}")
                 else:
-                    score += 20
-                    issues.append(f"Domaine non reconnu : {from_reg}")
+                    age = get_domain_age(from_reg)
+
+                    if age == -1:
+                        score += 10    # pas d’info WHOIS → léger risque
+                        issues.append(f"Pas d'informations whois sur le domaine : {from_reg}")
+                    elif age < 30:
+                        score += 40    # domaine ultra récent → gros risque
+                        issues.append(f"Domaine très récent : {from_reg}")
+                    elif age < 180:
+                        score += 20    # domaine récent
+                        issues.append(f"Domaine récent : {from_reg}")
+                    elif age < 365:
+                        score += 10    # domaine jeune
+                        issues.append(f"Domaine jeune : {from_reg}")
+                    else:
+                        score += 3
+                        issues.append(f"Domaine ancien, risque faible : {from_reg}")
 
 
     # --- Authentification (SPF, DKIM, DMARC) ---
-    auth = headers.get("authentication_results", {})
     for protocol in ["SPF", "DKIM", "DMARC"]:
         result = auth.get(protocol, "").lower()
         if result and result in ["fail", "permerror"]:
@@ -276,9 +366,16 @@ def analyse_liens(body, sender_domain_reg):
 
         # Domaine différent de l'expéditeur
         if sender_domain_reg and sender_domain_reg not in url_reg:
-            if url_reg not in {'googleusercontent.com','amazonaws.com','cloudfront.net','facebook.com', 'portswigger.net'}: # Pour ne pas trop agressif envers les CDNs/trackers courants
-                score += 20
-                issues.append(f"Lien externe : {url_reg} (expéditeur: {sender_domain_reg})")
+            if url_reg not in WHITELIST_DOMAINS: # Pour ne pas trop agressif envers les CDNs/trackers courants
+                link_age = get_domain_age(url_reg)
+                if link_age != -1:
+                    if link_age < 30:
+                        score += 40
+                        issues.append(f"Lien externe non reconnu : {url_reg} (expéditeur: {sender_domain_reg})")
+                    elif link_age < 180: score += 20
+                    elif link_age < 365: score += 10
+                else:
+                    score += 5
 
         # Raccourcisseur
         if is_shortener(host):
