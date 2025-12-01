@@ -19,7 +19,7 @@ except Exception:
 # === CONFIGURATION LOCALE ===
 WHITELIST_DOMAINS = {
     "paypal.com", "paypal.fr",
-    "amazon.com", "amazon.fr",
+    "amazon.com", "amazon.fr", "stripe.com",
     "banque-populaire.fr", "credit-agricole.fr", "labanquepostale.fr",
     "gmail.com", "outlook.com", "yahoo.com", "orange.fr", "free.fr", "portswigger.net"
 }
@@ -131,9 +131,9 @@ def is_lookalike(domain, candidates=None, max_distance=2):
     best_d = None
     for cand in candidates:
         d = Levenshtein.distance(domain, cand)
-    if best is None or d < best_d:
-        best = cand
-        best_d = d
+        if best is None or d < best_d:
+            best = cand
+            best_d = d
     if best is not None and best_d <= max_distance and best != domain:
         return True, best, best_d
     return False, None, 0
@@ -201,7 +201,7 @@ def analyse_headers(headers):
     received_len = len(received_headers)
     if received_len >= 6:
         score += 15
-        issues.append("Trop de serveurs relais: ", received_len)
+        issues.append(f"Trop de serveurs relais: {received_len}")
         
         sender_ip = headers.get("received", {}).get("sender_ip", "")
         issues.append(f"Adresse IP de l'emetteur: {sender_ip}")
@@ -231,10 +231,8 @@ def analyse_liens(body, sender_domain_reg):
 
     url_regex = r'\b(?:https?://|www\.)[a-zA-Z0-9._\-~:/?#\[\]@!$&\'()*+,;=%]+(?<![)\],.;!?])'
 
-    analysed_links = set() # Pour éviter les mêmes liens ne soient analysés plusieurs fois surtout dans les cas, où on appelera requests
+    seen_domains = set() # Pour éviter les mêmes liens ne soient analysés plusieurs fois surtout dans les cas, où on appelera requests
     for link in links:
-        if link in analysed_links:
-            continue
         # Si c'est une URL brute (str), pas un tuple
         if isinstance(link, str):
             url = link
@@ -242,15 +240,23 @@ def analyse_liens(body, sender_domain_reg):
         else:
             display_text, url = link
 
+    
         host = extract_host_from_url(url)
         if not host:
             continue
+
         url_reg = get_url_reg_domain(url)
-        
+        if not url_reg:
+            continue
+
+        if url_reg in seen_domains:
+            continue
+
+        seen_domains.add(url_reg)
         # Domaine dans la liste noire
         if url_reg in BLACKLIST_DOMAINS:
             score += 50
-            issues.append(f"Domaine malveillant : {url_domain}")
+            issues.append(f"Domaine malveillant : {url_reg}")
 
         # Détection de typosquattage
         look, match, dist = is_lookalike(url_reg)
@@ -273,7 +279,7 @@ def analyse_liens(body, sender_domain_reg):
             if url_reg not in {'googleusercontent.com','amazonaws.com','cloudfront.net','facebook.com', 'portswigger.net'}: # Pour ne pas trop agressif envers les CDNs/trackers courants
                 score += 20
                 issues.append(f"Lien externe : {url_reg} (expéditeur: {sender_domain_reg})")
-               
+
         # Raccourcisseur
         if is_shortener(host):
             score += 20
@@ -281,7 +287,7 @@ def analyse_liens(body, sender_domain_reg):
              # Optionnel: Résoud shortener si connexion internet
             if requests:
                 resolved = resolve_shortener(url)
-                if resolved and resolved != href:
+                if resolved and resolved != url:
                     dest_reg = get_registered_domain_from_url(resolved)
                     issues.append(f"Shortener résolu vers {dest_reg}")
                     # reévaluer resolved dest
@@ -289,7 +295,6 @@ def analyse_liens(body, sender_domain_reg):
                         score += 50
                         issues.append(f"Destination shortener en blacklist: {dest_reg}")
         
-        analysed_links.add(link)
     return score, issues
 
 
@@ -349,6 +354,7 @@ def detecter_phishing(headers, body):
             seen.add(issue)
             unique_issues.append(issue)
 
+    true_score = total_score
     total_score = min(total_score, 100)
 
     if total_score >= 70:
@@ -359,6 +365,7 @@ def detecter_phishing(headers, body):
         niveau = "Faible"
 
     return {
+        'true_score': true_score,
         "score": total_score,
         "niveau_risque": niveau,
         "problemes": unique_issues,
