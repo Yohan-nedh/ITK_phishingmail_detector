@@ -99,7 +99,7 @@ if __name__ == "__main__":
     
     G = "\033[92m"
     RESET = "\033[0m"
-    print(f"{G}ANALYSE DU FICHIER...{RESET}")
+    print(f"{G}ANALYSE DU FICHIER |***|{RESET}")
     analyser_email(chemin)
     
     
