@@ -19,3 +19,5 @@ Options :
 - Un tableau de classement pour encourager la compétition entre les utilisateurs
 - Des scénarios d'e-mails simulés pour la formation pratique
 - Des quiz interactifs pour tester les connaissances des utilisateurs sur la sécurité des e-mails
+
+

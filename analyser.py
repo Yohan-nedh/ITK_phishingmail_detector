@@ -5,6 +5,8 @@ Compatible avec mail_parsing.py
 """
 
 import re
+import atexit
+import vt
 import tldextract
 import Levenshtein # détection de typosquattage
 import whois
@@ -16,12 +18,38 @@ from urllib.parse import urlparse
 from email.utils import parseaddr
 from email.header import decode_header
 
+vt_key_file = Path("data/vt_api_key.txt")
+if vt_key_file.exists():
+    try:
+        vt_api_key = vt_key_file.read_text().strip()
+    except Exception as e:
+        print(f"Impossible de lire la clé VT : {e}")
+        vt_api_key = ""
+else:
+    print("Fichier data/vt_api_key.txt introuvable → VirusTotal désactivé")
+    vt_api_key = ""
+
+#==== API VT (VirusTotal) ====
+try:
+    if vt_api_key:
+        vt_client = vt.Client(vt_api_key)
+        vt_available = True
+    else:
+        vt_client = None
+        vt_available = False
+except ImportError:
+    print("Module 'vt' non installé → VirusTotal désactivé (pip install vt-py)")
+    vt_client = None
+    vt_available = False
+
 # Optionnel: Au cas où l'user n'aura pas la connexion internet
 try:
-    import requests # pour résooudre les shortener, histoire de voir où ça mène vraiment 
+    import requests # pour résooudre les shortener, histoire de voir où ça mène vraiment
 except Exception:
     requests = None
 
+vt_cache_file = Path("data/vt_cache.json")
+vt_cache_ttl = 86400 * 7  # 24 heures
 
 # === CONFIGURATION LOCALE ===
 WHITELIST_DOMAINS = {
@@ -67,15 +95,29 @@ URL_SHORTENERS = {"bit.ly", "t.co", "goo.gl", "tinyurl.com", "ow.ly"}
 DANGEROUS_EXT = {".exe", ".scr", ".js", ".vbs", ".bat", ".ps1", ".zip", ".rar"}
 DANGEROUS_MIME = {"application/x-msdownload", "application/x-msdos-program", "application/x-executable", "application/javascript", "text/javascript"}
 
+# === CACHE VIRUSTOTAL ===
+def load_vt_cache():
+    """Charge le cache VT"""
+    if vt_cache_file.exists():
+        try:
+            return json.load(open(vt_cache_file))
+        except:
+            return {}
+    return {}
+
+def save_vt_cache(cache):
+    """Sauvegarde le cache VT"""
+    vt_cache_file.parent.mkdir(exist_ok=True)
+    json.dump(cache, open(vt_cache_file, "w"), indent=2)
 
 # === FONCTIONS UTILITAIRES ===
 def normalize_email_addr(addr):
     """Nettoie le champ possible: 'Name <user@domain>' -> user@domain"""
-    if not addr: 
-    	return "", ""
-    	
+    if not addr:
+        return "", ""
+
     name, mail = parseaddr(addr)
-    
+
     # Décodage RFC2047 éventuel (=?utf-8?...?=)
     if name:
         decoded = decode_header(name)
@@ -83,10 +125,10 @@ def normalize_email_addr(addr):
             part.decode(encoding or "utf-8") if isinstance(part, bytes) else part
             for part, encoding in decoded
         )
-        
+
     return name, mail
-    
-    
+
+
 def get_host_reg_domain(hostname):
     """Extrait le domaine enrégistré d'un hostname."""
     if not hostname:
@@ -97,7 +139,7 @@ def get_host_reg_domain(hostname):
     hostname = hostname.strip().lower()
     if hostname.startswith("[") and hostname.endswith("]"):
         hostname = hostname[1:-1]
-    
+
     if ":" in hostname and not ":" in hostname.replace("::", ""):
         hostname = hostname.split(":")[0]
 
@@ -108,15 +150,15 @@ def get_host_reg_domain(hostname):
 
 
 def get_host(domain):
-	"""Extrait le host du domaine: amazon.com -> amazon, paypal.com -> paypal"""
-	if not domain:
-		return ""
-		
-	ext = tldextract.extract(domain)
-	if ext.domain:
-		return f"{ext.domain}"
-	
-	
+    """Extrait le host du domaine: amazon.com -> amazon, paypal.com -> paypal"""
+    if not domain:
+        return ""
+
+    ext = tldextract.extract(domain)
+    if ext.domain:
+        return f"{ext.domain}"
+
+
 def get_url_reg_domain(url):
     """Extrait le nom de domaine d'une URL."""
     try:
@@ -156,21 +198,21 @@ def load_whois_cache():
         except:
             return {}
     return {}
-    
+
 
 def save_whois_cache(cache):
     """Sauvegarde le cache WHOIS"""
     CACHE_FILE.parent.mkdir(exist_ok=True)
     json.dump(cache, open(CACHE_FILE, "w"), indent=2)
-        
-     
+
+
 def get_domain_age(domain):
     """Retourne l'âge du domaine en jours, ou None si inconnu."""
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()): # Pour ne pas afficher les erreurs dans la sortie
             w = whois.whois(domain)
     except Exception:
-    	return None
+        return None
 
     creation = w.creation_date
 
@@ -191,10 +233,10 @@ def get_domain_age(domain):
 
     # Neutraliser timezone-aware datetimes
     creation = creation.replace(tzinfo=None)
-    
+
     age = (datetime.utcnow() - creation).days
     return age
-    
+
 
 def get_domain_age_cached(domain):
     now = int(time.time())
@@ -206,7 +248,7 @@ def get_domain_age_cached(domain):
 
         if "age" in entry:
             return entry["age"]
-            
+
         if "error" in entry:
             # Erreur récente
             if now - entry["ts"] < ERROR_TTL:
@@ -265,6 +307,48 @@ def is_lookalike(domain, candidates=None, max_distance=2):
         return True, best, best_d
     return False, None, 0
 
+# === VIRUSTOTAL INTEGRATION ===
+vt_client = None
+if vt_available and vt_api_key != "" and vt_api_key.strip():
+    vt_client = vt.Client("data/vt_api_key.txt")
+
+def check_url_vt(url):
+    if not vt_available or not vt_client:
+        return 0, []
+
+    cache = load_vt_cache()
+    now = int(time.time())
+
+    if url in cache:
+        if now - cache[url]["ts"] < vt_cache_ttl:
+            stats = cache[url]["stats"]
+            malicious = stats.get("malicious", 0) + stats.get("phishing", 0)
+            suspicious = stats.get("suspicious", 0)
+            if malicious > 0:
+                return 60, [f"VirusTotal : {url} → {malicious} détections phishing/malveillant"]
+            if suspicious > 0:
+                return 25, [f"VirusTotal : {url} → {suspicious} détections suspectes"]
+            return 0, [f"VirusTotal : {url} → propre"]
+
+    try:
+        analysis = vt_client.scan_url(url)
+        # On attend pas forcément la fin du scan, on récupère le dernier connu
+        obj = vt_client.get_object(f"/urls/{analysis.id.split('/')[-1]}")
+        stats = obj.last_analysis_stats
+        malicious = stats.get("malicious", 0) + stats.get("phishing", 0)
+        suspicious = stats.get("suspicious", 0)
+
+        cache[url] = {"stats": stats, "ts": now}
+        save_vt_cache(cache)
+
+        if malicious > 0:
+            return 60, [f"VirusTotal : {url} → {malicious} détections graves !"]
+        if suspicious > 0:
+            return 25, [f"VirusTotal : {url} → {suspicious} alertes"]
+        return 0, [f"VirusTotal : {url} → aucun problème détecté"]
+    except Exception as e:
+        return 0, [f"VirusTotal indisponible : {str(e)}"]
+
 
 # === ANALYSES ===
 def analyse_headers(headers):
@@ -275,13 +359,13 @@ def analyse_headers(headers):
     # --- Expéditeur ---
     from_raw = headers.get("from", "")
     reply_to_raw = headers.get("reply_to", "")
-    
+
     from_username, from_addr = normalize_email_addr(from_raw)
     reply_to_username, reply_to = normalize_email_addr(reply_to_raw)
-    
+
     from_reg = get_host_reg_domain(from_addr)
     reply_reg = get_host_reg_domain(reply_to)
-    
+
     auth = headers.get("authentication_results", {})
 
     if from_addr and reply_to and from_reg != reply_reg:
@@ -297,8 +381,8 @@ def analyse_headers(headers):
 
         if from_reg not in FREEMAIL_DOMAINS and reply_reg not in FREEMAIL_DOMAINS:
             score += 10
-            
-        
+
+
         if from_username and reply_to_username and from_username != reply_to_username:
             score += 20
             issues.append(f"Incohérence entre les usernames des champs 'De' et 'Répondre à': {from_username} != {reply_to_username}")
@@ -312,9 +396,9 @@ def analyse_headers(headers):
             if lookalike:
                 score += 20
                 issues.append(f"{from_reg} ressemble à {true_domain} (d={dist})")
-            
+
             if from_reg not in WHITELIST_DOMAINS:
-                if any(legit in from_reg for legit in ["paypal", "amazon", "banque", "gmail"]): # À revoir, ça va créer trop de faux positifs, le cas de 
+                if any(legit in from_reg for legit in ["paypal", "amazon", "banque", "gmail"]): # À revoir, ça va créer trop de faux positifs, le cas de
                     score += 40
                     issues.append(f"Domaine falsifié : {from_reg}")
                 else:
@@ -362,7 +446,7 @@ def analyse_headers(headers):
     if received_len >= 8:
         score += 5
         issues.append(f"Trop de serveurs relais: {received_len}")
-        
+
         sender_ip = headers.get("received", {}).get("sender_ip", "")
         issues.append(f"Adresse IP de l'emetteur: {sender_ip}")
 
@@ -383,85 +467,48 @@ def analyse_corps(body):
     return score, issues
 
 
-def analyse_liens(body, sender_domain_reg):
+def analyse_liens(body, sender_domain):
     """Analyse les liens (usurpation, raccourcisseur, domaine)."""
-    score = 0
-    issues = []
+    score, issues = 0, []
     links = body.get("links", [])
+    seen = set()
 
-    url_regex = r'\b(?:https?://|www\.)[a-zA-Z0-9._\-~:/?#\[\]@!$&\'()*+,;=%]+(?<![)\],.;!?])'
-
-    seen_domains = set() # Pour éviter les mêmes liens ne soient analysés plusieurs fois surtout dans les cas, où on appelera requests
     for link in links:
-        # Si c'est une URL brute (str), pas un tuple
         if isinstance(link, str):
             url = link
-            display_text = url
+            display = link
         else:
-            display_text, url = link
+            display, url = link
 
-    
-        host = extract_host_from_url(url)
-        if not host:
+        url_domain = get_url_reg_domain(url)
+        if not url_domain or url_domain in seen:
             continue
+        seen.add(url_domain)
 
-        url_reg = get_url_reg_domain(url)
-        if not url_reg:
-            continue
+        # VT check
+        vt_score, vt_issues = check_url_vt(url)
+        score += vt_score
+        issues.extend(vt_issues)
 
-        if url_reg in seen_domains:
-            continue
+        # Lien usurpé
+        if display != url and get_url_reg_domain(display) != url_domain:
+            score += 30
+            issues.append(f"Lien usurpé : affiche « {display} » → {url_domain}")
 
-        seen_domains.add(url_reg)
-        # Domaine dans la liste noire
-        if url_reg in BLACKLIST_DOMAINS:
-            score += 50
-            issues.append(f"Domaine malveillant : {url_reg}")
-
-        # Détection de typosquattage
-        look, match, dist = is_lookalike(url_reg)
-        if look:
+        # Shortener
+        if is_shortener(url):
             score += 20
-            issues.append(f"Possible typosquat: {url_reg} ressemble à {match} (d={dist})")
-        
-        # Lien usurpé (texte ≠ domaine)
-        matches = re.findall(url_regex, display_text)
-        if matches:
-            for l in matches:
-                domain_in_text = get_url_reg_domain(l)
-                if domain_in_text and domain_in_text != url_reg:
-                    score += 25
-                    issues.append(f"Lien usurpé : « {l} » mais pointe vers {url_reg}")
-        
+            issues.append(f"Raccourcisseur détecté : {url_domain}")
+            if resolved := resolve_shortener(url):
+                issues.append(f"→ redirige vers {get_url_reg_domain(resolved)}")
 
-        # Domaine différent de l'expéditeur
-        if sender_domain_reg and sender_domain_reg not in url_reg:
-            if url_reg not in WHITELIST_DOMAINS: # Pour ne pas trop agressif envers les CDNs/trackers courants
-                link_age = get_domain_age_cached(url_reg)
-                if link_age != None:
-                    if link_age < 30:
-                        score += 40
-                        issues.append(f"Lien externe non reconnu : {url_reg} (expéditeur: {sender_domain_reg})")
-                    elif link_age < 180: score += 20
-                    elif link_age < 365: score += 10
-                else:
-                    score += 5
+        # Domaine externe + jeune
+        if sender_domain and url_domain != sender_domain and url_domain not in WHITELIST_DOMAINS:
+            age = get_domain_age_cached(url_domain)
+            if age is not None and age < 90:
+                score += 25
+                issues.append(f"Lien externe récent : {url_domain} ({age} jours)")
 
-        # Raccourcisseur
-        if is_shortener(host):
-            score += 20
-            issues.append(f"Raccourcisseur détecté : {url_reg}")
-             # Optionnel: Résoud shortener si connexion internet
-            if requests:
-                resolved = resolve_shortener(url)
-                if resolved and resolved != url:
-                    dest_reg = get_url_reg_domain(resolved)
-                    issues.append(f"Shortener résolu vers {dest_reg}")
-                    # reévaluer resolved dest
-                    if dest_reg in BLACKLIST_DOMAINS:
-                        score += 50
-                        issues.append(f"Destination shortener en blacklist: {dest_reg}")
-        
     return score, issues
 
 
@@ -508,12 +555,12 @@ def detecter_phishing(headers, body):
         analyse_liens(body, sender_domain_reg),
         analyse_pieces_jointes(body)
     ]
-    
-	
+
+
     for s, i in analyses:
         total_score += s
         all_issues.extend(i)
-    
+
     unique_issues = []
     seen = set()
 
@@ -545,7 +592,10 @@ def detecter_phishing(headers, body):
         ] if total_score >= 50 else []
     }
 
+# Fermeture propre du client VT à la fin du programme
 
+if vt_client:
+    atexit.register(vt_client.close)
 
 
 """
@@ -571,9 +621,6 @@ AUTRES REMARQUES:
 - Suspicious keyword est en français, dans le cas où le mail est dans une autre langue.....
 - Revoir is_lookalike pour détecter les attaques d'homoglyphes
 """
-
-
-
 
 
 
