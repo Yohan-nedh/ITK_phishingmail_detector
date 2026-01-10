@@ -1,8 +1,6 @@
-# Parsing eml files
+# Parsing mail files
 import re
 import ipaddress
-from email.parser import BytesParser
-from email import policy
 from bs4 import BeautifulSoup # Pour extraire les liens du contenu HTML, ne pas oublier d'installer html.parser
 
 
