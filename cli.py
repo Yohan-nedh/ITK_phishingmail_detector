@@ -1,3 +1,6 @@
+"""
+cli.py
+Interface en ligne de commande pour l'analyse des emails"""
 import argparse
 from pathlib import Path
 from analyzer import analyser_email, save_results
@@ -21,7 +24,7 @@ def main():
     
     GREEN = "\033[92m"
     RESET = "\033[0m"
-    print(f"{GREEN}FILE ANALYSIS |***|{RESET}\n")
+    print(f"{GREEN}ANALYSE DU FICHIER |***|{RESET}\n")
 
 
     VERSION = "1.0.0"

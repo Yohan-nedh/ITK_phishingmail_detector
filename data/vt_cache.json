@@ -1,0 +1,52 @@
+{
+  "https://t.co/eYVtqVunRC": {
+    "stats": {
+      "malicious": 1,
+      "suspicious": 0,
+      "undetected": 28,
+      "harmless": 68,
+      "timeout": 0
+    },
+    "ts": 1768247423
+  },
+  "http://bsq2.firiri.shop/cGNjTnA0S1BmODB4K2U0U1NsaFhKaFJwR2xWM1lRMW45SHZaSlVwRHd4WVJ3M3pCMllBUjQrcWRmR2Q2bzZTdVZmSzk0VTNHKzlpVENPQlhNd0U2QVE9PQ__": {
+    "stats": {
+      "malicious": 9,
+      "suspicious": 0,
+      "undetected": 29,
+      "harmless": 59,
+      "timeout": 0
+    },
+    "ts": 1768247428
+  },
+  "http://nonpaint.shop/4mUVmt11605SVdL237bysyxydjef58JZQPYOUPDJRCYSX127587VQTC13074a4": {
+    "stats": {
+      "malicious": 0,
+      "suspicious": 0,
+      "undetected": 0,
+      "harmless": 0,
+      "timeout": 0
+    },
+    "ts": 1768251348
+  },
+  "http://emailservicesnetau.com/4dyoON12494cfBB43ojygrixvrm58JHGUTCFAERGYHVE127587FNGI13024H4": {
+    "stats": {
+      "malicious": 0,
+      "suspicious": 0,
+      "undetected": 0,
+      "harmless": 0,
+      "timeout": 0
+    },
+    "ts": 1768251464
+  },
+  "https://\ud835\uddee\ud835\uddf1\ud835\ude03\ud835\uddf2\ud835\uddfb\ud835\ude01\ud835\ude02\ud835\uddff\ud835\uddf2\ud835\ude00\ud835\ude04\ud835\uddf2\ud835\uddf9\ud835\uddf9.\ud835\uddf0\ud835\uddfc\ud835\uddfa/4qmray1103aGwS166nzruxoohoz489PDFBXCHGXYHBIPK3789197FNJS11222V9": {
+    "stats": {
+      "malicious": 0,
+      "suspicious": 0,
+      "undetected": 0,
+      "harmless": 0,
+      "timeout": 0
+    },
+    "ts": 1768251636
+  }
+}

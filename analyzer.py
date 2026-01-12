@@ -1,15 +1,20 @@
 """
 analyzer.py
 Analyse complète d'un email pour détecter le phishing
-Compatible avec mail_parsing.py
 """
 
+try:
+    import tldextract
+    import Levenshtein
+    import atexit
+    import vt
+    import whois
+except ModuleNotFoundError as e:
+    print(f"Erreur, module manquant : {e.name}. Assurez-vous d'avoir activer votre environnement virtuel et installer les dépendances requises via 'pip install -r requirements.txt'.")
+    exit(1)
+
 import re
-import tldextract
-import Levenshtein
-import atexit
-import vt
-import whois
+import base64
 import contextlib, io
 import json, time
 import requests
@@ -308,6 +313,7 @@ vt_client = None
 vt_available = False
 
 def init_vt_client():
+    """Initialise le client VirusTotal"""
     global vt_client, vt_available
     vt_api_key = load_vt_key()
     if vt_api_key:
@@ -325,7 +331,16 @@ def init_vt_client():
 
 
 # === VIRUSTOTAL CHECK ===
+def vt_url_id(url):
+    """Génère l'ID VT pour une URL"""
+    url_bytes = url.encode('utf-8')
+    url_b64 = base64.urlsafe_b64encode(url_bytes).decode('utf-8').strip('=')
+    return url_b64
+
+
 def check_url_vt(url):
+    """Vérifie une URL via VirusTotal"""
+    global vt_client, vt_available
     if not vt_client:
         return 0, []
 
@@ -347,12 +362,14 @@ def check_url_vt(url):
             return 60, [f"VirusTotal : {url} → {malicious} détections phishing/malveillant"]
         if suspicious > 0:
             return 25, [f"VirusTotal : {url} → {suspicious} détections suspectes"]
-        return 0, [f"VirusTotal : {url} → propre"]
+        return 0, [f"VirusTotal : {url} → aucun problème détecté"]
 
     try:
-        analysis = vt_client.scan_url(url)
-        obj = vt_client.get_object(f"/urls/{analysis.id.split('/')[-1]}")
-        stats = obj.last_analysis_stats
+        vt_client.scan_url(url)
+        time.sleep(2)  # Attendre que l'analyse soit prête
+        url_id = vt_url_id(url)
+        obj = vt_client.get_object(f"/urls/{url_id}")
+        stats = dict(obj.last_analysis_stats)
         malicious = stats.get("malicious", 0) + stats.get("phishing", 0)
         suspicious = stats.get("suspicious", 0)
 
@@ -360,9 +377,9 @@ def check_url_vt(url):
         save_vt_cache(cache)
 
         if malicious > 0:
-            return 60, [f"VirusTotal : {url} → {malicious} détections graves !"]
+            return 60, [f"VirusTotal : {url} → {malicious} détections phishing/malveillant"]
         if suspicious > 0:
-            return 25, [f"VirusTotal : {url} → {suspicious} alertes"]
+            return 25, [f"VirusTotal : {url} → {suspicious} détections suspectes"]
         return 0, [f"VirusTotal : {url} → aucun problème détecté"]
     except Exception as e:
         return 0, [f"Analyse VirusTotal indisponible : {str(e)}"]
