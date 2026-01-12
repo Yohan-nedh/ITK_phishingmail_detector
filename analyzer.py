@@ -303,11 +303,11 @@ def load_vt_key():
     return vt_api_key
 
 
+# === INITIALISATION VIRUSTOTAL CLIENT ===
 vt_client = None
 vt_available = False
 
-# === VIRUSTOTAL CHECK ===
-def check_url_vt(url):
+def init_vt_client():
     global vt_client, vt_available
     vt_api_key = load_vt_key()
     if vt_api_key:
@@ -320,6 +320,18 @@ def check_url_vt(url):
             print(f"Erreur d'initialisation VirusTotal : {e}")
     else:
         print("Clé VirusTotal absente → VirusTotal désactivé")
+
+    return vt_client, vt_available
+
+
+# === VIRUSTOTAL CHECK ===
+def check_url_vt(url):
+    if not vt_client:
+        return 0, []
+
+    cache = load_vt_cache()
+    now = int(time.time())
+
     
     if not vt_client:
         return 0, []
@@ -475,6 +487,7 @@ def analyse_corps(body):
 
 def analyse_liens(body, sender_domain_reg):
     """Analyse les liens (usurpation, raccourcisseur, domaine)."""
+    global vt_client, vt_available
     score = 0
     issues = []
     links = body.get("links", [])
@@ -482,6 +495,8 @@ def analyse_liens(body, sender_domain_reg):
     url_regex = r'\b(?:https?://|www\.)[a-zA-Z0-9._\-~:/?#\[\]@!$&\'()*+,;=%]+(?<![)\],.;!?])'
 
     seen_domains = set() # Pour éviter les mêmes liens ne soient analysés plusieurs fois surtout dans les cas, où on appelera requests
+    vt_client, vt_available = init_vt_client()
+
     for link in links:
         # Si c'est une URL brute (str), pas un tuple
         if isinstance(link, str):
@@ -557,6 +572,10 @@ def analyse_liens(body, sender_domain_reg):
                     if dest_reg in BLACKLIST_DOMAINS:
                         score += 50
                         issues.append(f"Destination shortener en blacklist: {dest_reg}")
+    
+    # Fermeture propre du client VT
+    if vt_client:
+        atexit.register(vt_client.close)
         
     return score, issues
 
@@ -694,11 +713,6 @@ def save_results(file, results, fp):
             for r in results['recommandations']:
                 of.write(f" • {r}\n")
     print(f"\n{GREEN}Résultats de l'analyse sauvegardés dans {file}{RESET}")
-
-
-# Fermeture propre du client VT
-if vt_client:
-    atexit.register(vt_client.close)
 
 
 
